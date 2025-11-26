@@ -1,0 +1,47 @@
+# Virtual Environment
+.venv/
+venv/
+env/
+ENV/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local development
+*.db
+*.sqlite
+*.sqlite3
+btde_logs.db
+btde_anomaly_model.pkl
+
+# IDE & Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Temporary files
+*.tmp
+*.log
+*.csv
+
+# Cache
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Package distributions
+dist/
+build/
+*.egg-info/
