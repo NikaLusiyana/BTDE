@@ -1241,6 +1241,76 @@ class AlertManager:
         return
 
 # =============================================================================
+# HELPER FUNCTIONS: ACTION MAPPING & SYNC
+# =============================================================================
+
+# Mapping dari rule-based recommendations ke actual executable actions
+ACTION_MAPPING = {
+    'BLOCK_IP_1H': 'AUTO_BLOCK',
+    'BLOCK_IP_24H': 'AUTO_BLOCK',
+    'BLOCK_REQUEST': 'AUTO_BLOCK',
+    'LOCK_ACCOUNT': 'LOCK_ACCOUNT',
+    'CHALLENGE_2FA': 'CHALLENGE_MFA',
+    'RATE_LIMIT': 'RATE_LIMIT',
+    'MANUAL_REVIEW': 'FLAG_FOR_REVIEW',
+    'ALERT_ADMIN': 'ALERT_ADMIN',
+    'LOG_FULL_REQUEST': 'LOG_DETAILED'
+}
+
+def map_rule_action(rule_action: str) -> str:
+    """Convert rule-based action to executable action."""
+    return ACTION_MAPPING.get(rule_action, rule_action)
+
+def sync_recommended_actions(rule_actions: list, risk_score: float, confidence: str, 
+                             auto_response_engine) -> tuple:
+    """
+    Sinkronisasi rule-based recommendations dengan actual executable actions.
+    Returns: (synced_actions, execution_status, will_execute)
+    """
+    # Konversi rule recommendations ke executable actions
+    executable_actions = [map_rule_action(action) for action in rule_actions]
+    
+    # Ambil actions dari matrix berdasarkan risk score & confidence
+    matrix_actions = auto_response_engine.get_response_actions(risk_score, confidence)
+    
+    # Filter hanya actions yang benar2 akan dieksekusi
+    synced_actions = [action for action in executable_actions if action in matrix_actions]
+    
+    # Tentukan execution status
+    if risk_score >= 80 and confidence == 'HIGH':
+        execution_status = "🔴 CRITICAL"
+        will_execute = True
+    elif risk_score >= 80 and confidence == 'MEDIUM':
+        execution_status = "🟠 HIGH"
+        will_execute = True
+    elif risk_score >= 60 and confidence == 'HIGH':
+        execution_status = "🟠 HIGH"
+        will_execute = True
+    elif risk_score >= 60:
+        execution_status = "🟡 MEDIUM"
+        will_execute = False
+    elif risk_score >= 40:
+        execution_status = "🟡 MEDIUM"
+        will_execute = False
+    else:
+        execution_status = "🟢 LOW"
+        will_execute = False
+    
+    return synced_actions, execution_status, will_execute
+
+def get_execution_reason(risk_score: float, confidence: str, synced_actions: list) -> str:
+    """Explain why actions will or won't be executed."""
+    if not synced_actions:
+        if risk_score < 60:
+            return "Below auto-response threshold (< 60)"
+        elif confidence != 'HIGH':
+            return f"Confidence level {confidence} (requires HIGH for execution below 80)"
+        else:
+            return "Monitoring only"
+    else:
+        return f"Will execute via matrix matching (Score: {risk_score:.1f}, Confidence: {confidence})"
+
+# =============================================================================
 # FUNGSI PEMROSESAN LOG
 # =============================================================================
 
@@ -1280,6 +1350,28 @@ def process_log(log):
 
     log['automated_actions'] = full_actions
     log['automated_actions_limited'] = limited_actions
+    
+    # === NEW: Sync recommended actions with actual execution ===
+    synced_actions, execution_status, will_execute = sync_recommended_actions(
+        result['rule_detection']['actions'],
+        result['risk']['score'],
+        confidence,
+        st.session_state.auto_response_engine
+    )
+    log['synced_actions'] = synced_actions
+    log['execution_status'] = execution_status
+    log['will_execute'] = will_execute
+    log['execution_reason'] = get_execution_reason(
+        result['risk']['score'], 
+        confidence, 
+        synced_actions
+    )
+    
+    # Consistency check: log when rule recommends action but won't be executed
+    rule_recommends_block = any('BLOCK' in action for action in result['rule_detection']['actions'])
+    actual_blocks = 'AUTO_BLOCK' in limited_actions
+    if rule_recommends_block and not actual_blocks:
+        log['consistency_note'] = f"Rule recommends BLOCK but not executed (Score: {result['risk']['score']:.1f}, Confidence: {confidence})"
 
     # Optionally submit IOC to community hub when enabled and high confidence
     try:
@@ -1758,11 +1850,30 @@ def main():
                         for alert_msg in alert['anomaly_detection']['alerts']:
                             st.markdown(f"- {alert_msg}")
                     
-                    # Actions
-                    if alert['rule_detection']['actions']:
-                        st.markdown("**⚡ Recommended Actions:**")
-                        for action in alert['rule_detection']['actions']:
-                            st.markdown(f"- {action}")
+                    # === NEW: Execution Status Section ===
+                    execution_status = alert.get('execution_status', '🟡 MEDIUM')
+                    execution_reason = alert.get('execution_reason', 'Analyzing...')
+                    st.markdown(f"**Execution Status:** {execution_status}")
+                    st.caption(f"ℹ️ {execution_reason}")
+                    
+                    # === NEW: Show synced actions (only those that will execute) ===
+                    synced_actions = alert.get('synced_actions', [])
+                    if synced_actions:
+                        st.markdown("**✅ Automated Response Actions:**")
+                        for action in synced_actions:
+                            will_exec = action in alert.get('automated_actions_limited', [])
+                            status = "🔴 EXECUTING" if will_exec else "⏳ QUEUED"
+                            st.markdown(f"- `{action}` — {status}")
+                    else:
+                        # Show original recommendations for transparency
+                        if alert['rule_detection']['actions']:
+                            st.markdown("**ℹ️ Rule Recommendations (not executed at this threshold):**")
+                            for action in alert['rule_detection']['actions']:
+                                st.markdown(f"- ~~{action}~~")
+                    
+                    # Show consistency note if exists
+                    if alert.get('consistency_note'):
+                        st.warning(f"⚠️ {alert['consistency_note']}")
                     
                     # Action Buttons
                     col1, col2, col3 = st.columns([1, 1, 3])
@@ -1822,9 +1933,13 @@ def main():
                     'Type': log['type'],
                     'Risk Score': f"{log['total_score']:.1f}",
                     'Risk Level': log['risk_level'],
+                    'Confidence': log.get('confidence', 'LOW'),
                     'Alerts': log['alerts'][:50] + '...' if len(log['alerts']) > 50 else log['alerts'],
-                    'Automated Actions (full)': ','.join(log.get('automated_actions', [])),
-                    'Automated Actions (executed)': ','.join(log.get('automated_actions_limited', []))
+                    'Execution Status': log.get('execution_status', '🟢 LOW'),
+                    'Will Execute': '✅ YES' if log.get('will_execute') else '❌ NO',
+                    'Automated Actions (synced)': ','.join(log.get('synced_actions', [])),
+                    'Automated Actions (executed)': ','.join(log.get('automated_actions_limited', [])),
+                    'Consistency': '⚠️ ISSUE' if log.get('consistency_note') else '✅ OK'
                 }
                 for log in reversed(filtered_logs)
             ])
