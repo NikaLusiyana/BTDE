@@ -1276,39 +1276,43 @@ def sync_recommended_actions(rule_actions: list, risk_score: float, confidence: 
     # Filter hanya actions yang benar2 akan dieksekusi
     synced_actions = [action for action in executable_actions if action in matrix_actions]
     
-    # Tentukan execution status
-    if risk_score >= 80 and confidence == 'HIGH':
-        execution_status = "🔴 CRITICAL"
-        will_execute = True
-    elif risk_score >= 80 and confidence == 'MEDIUM':
-        execution_status = "🟠 HIGH"
-        will_execute = True
-    elif risk_score >= 60 and confidence == 'HIGH':
-        execution_status = "🟠 HIGH"
-        will_execute = True
+    # === PERBAIKAN: Gunakan should_execute_actions untuk konsistensi ===
+    will_execute = auto_response_engine.should_execute_actions(risk_score, confidence)
+    
+    # === PERBAIKAN: Tentukan execution status berdasarkan risk score dan confidence ===
+    if risk_score >= 80:
+        if confidence == 'HIGH':
+            execution_status = "🔴 CRITICAL - Auto-Execution"
+        else:
+            execution_status = "🟠 HIGH - Conditional Execution"
     elif risk_score >= 60:
-        execution_status = "🟡 MEDIUM"
-        will_execute = False
+        if confidence == 'HIGH':
+            execution_status = "🟠 HIGH - Conditional Execution" 
+        else:
+            execution_status = "🟡 MEDIUM - Monitoring"
     elif risk_score >= 40:
-        execution_status = "🟡 MEDIUM"
-        will_execute = False
+        execution_status = "🟡 MEDIUM - Monitoring"
     else:
-        execution_status = "🟢 LOW"
-        will_execute = False
+        execution_status = "🟢 LOW - Baseline"
     
     return synced_actions, execution_status, will_execute
 
-def get_execution_reason(risk_score: float, confidence: str, synced_actions: list) -> str:
+def get_execution_reason(risk_score: float, confidence: str, synced_actions: list, will_execute: bool) -> str:
     """Explain why actions will or won't be executed."""
-    if not synced_actions:
+    if not will_execute:
         if risk_score < 60:
-            return "Below auto-response threshold (< 60)"
-        elif confidence != 'HIGH':
-            return f"Confidence level {confidence} (requires HIGH for execution below 80)"
+            return f"Below auto-execution threshold (Score: {risk_score} < 60)"
+        elif risk_score < 80 and confidence != 'HIGH':
+            return f"Medium confidence {confidence} (requires HIGH for scores 60-79)"
         else:
-            return "Monitoring only"
+            return "Monitoring only - below execution criteria"
     else:
-        return f"Will execute via matrix matching (Score: {risk_score:.1f}, Confidence: {confidence})"
+        if risk_score >= 80:
+            return f"Critical risk (Score: {risk_score}) - Auto-execution"
+        elif confidence == 'HIGH':
+            return f"High confidence detection - Conditional execution"
+        else:
+            return f"Matrix match (Score: {risk_score}, Confidence: {confidence})"
 
 # =============================================================================
 # FUNGSI PEMROSESAN LOG
@@ -1362,10 +1366,11 @@ def process_log(log):
     log['execution_status'] = execution_status
     log['will_execute'] = will_execute
     log['execution_reason'] = get_execution_reason(
-        result['risk']['score'], 
-        confidence, 
-        synced_actions
-    )
+    result['risk']['score'], 
+    confidence, 
+    synced_actions,
+    will_execute
+)
     
     # Consistency check: log when rule recommends action but won't be executed
     rule_recommends_block = any('BLOCK' in action for action in result['rule_detection']['actions'])
